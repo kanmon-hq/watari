@@ -4,3 +4,4 @@ Cargo.lock
 *.db
 *.db-journal
 .env
+.codeboarding/
