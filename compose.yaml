@@ -1,0 +1,33 @@
+services:
+  watari:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: watari
+    ports:
+      - "8080:8080"
+    environment:
+      # 認証用共有シークレット（ローカル開発用）
+      - GATEWAY_SHARED_SECRET=dev-gateway-shared-secret-local
+      # ストレージ設定
+      - STORAGE_BACKEND=memory
+      - MEMORY_SEED_FILE=/app/examples/tenants.yaml
+      # シークレットストア設定
+      - SECRET_BACKEND=env
+      # テナント用シークレット注入定義（examples/tenants.yaml に対応）
+      - STRIPE_KEY_TENANT_A=sk_test_mock_stripe_key_tenant_a_12345
+      - SENDGRID_KEY_TENANT_A=SG.mock_sendgrid_key_tenant_a_67890
+      # ログ設定
+      - LOG_LEVEL=debug
+      - LOG_FORMAT=text
+      # 開発用フラグ（必要に応じてコンテナ内・ローカルIPへのアクセスを許可）
+      - ALLOW_PRIVATE_IPS=false
+      - ALLOW_INSECURE_UPSTREAM=false
+    volumes:
+      - ./examples:/app/examples:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8080/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped

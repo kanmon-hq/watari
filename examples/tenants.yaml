@@ -1,0 +1,25 @@
+tenants:
+  tenant-a:
+    upstreams:
+      stripe:
+        base_url: "https://api.stripe.com"
+        inject:
+          - header: "Authorization"
+            template: "Bearer {secret}"
+            secret_ref: "STRIPE_KEY_TENANT_A"
+            version: "latest"
+        rate_limit:
+          rpm: 100
+          burst: 10
+        timeout_secs: 30
+      sendgrid:
+        base_url: "https://api.sendgrid.com"
+        inject:
+          - header: "Authorization"
+            template: "Bearer {secret}"
+            secret_ref: "SENDGRID_KEY_TENANT_A"
+            version: "latest"
+        rate_limit:
+          rpm: 60
+          burst: 5
+        timeout_secs: 15
