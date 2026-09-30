@@ -61,28 +61,79 @@ pub async fn proxy_handler(
     // Inner handler to capture AppError and format error responses with request_id
     match execute_proxy_request(ctx).await {
         Ok(resp) => {
-            let latency_ms = start_time.elapsed().as_millis();
+            let latency = start_time.elapsed();
+            let latency_ms = latency.as_millis();
+            let status = resp.status().as_u16();
+            let status_str = status.to_string();
             let tenant_id = headers
                 .get("x-tenant-id")
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("unknown");
 
+            metrics::counter!(
+                "watari_requests_total",
+                "upstream" => upstream_name.clone(),
+                "tenant_id" => tenant_id.to_string(),
+                "status" => status_str
+            )
+            .increment(1);
+
+            metrics::histogram!(
+                "watari_request_duration_seconds",
+                "upstream" => upstream_name.clone()
+            )
+            .record(latency.as_secs_f64());
+
             tracing::info!(
                 request_id = %request_id,
                 tenant_id = %tenant_id,
                 upstream = %upstream_name,
-                status = %resp.status().as_u16(),
+                status = %status,
                 latency_ms = %latency_ms,
                 "proxy request completed"
             );
             resp
         }
         Err(err) => {
-            let latency_ms = start_time.elapsed().as_millis();
+            let latency = start_time.elapsed();
+            let latency_ms = latency.as_millis();
             let tenant_id = headers
                 .get("x-tenant-id")
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("unknown");
+            let status_code = err.status_code().as_u16();
+            let status_str = status_code.to_string();
+
+            metrics::counter!(
+                "watari_requests_total",
+                "upstream" => upstream_name.clone(),
+                "tenant_id" => tenant_id.to_string(),
+                "status" => status_str
+            )
+            .increment(1);
+
+            metrics::histogram!(
+                "watari_request_duration_seconds",
+                "upstream" => upstream_name.clone()
+            )
+            .record(latency.as_secs_f64());
+
+            if matches!(err, AppError::RateLimited { .. }) {
+                metrics::counter!(
+                    "watari_rate_limited_total",
+                    "upstream" => upstream_name.clone(),
+                    "tenant_id" => tenant_id.to_string()
+                )
+                .increment(1);
+            }
+
+            if matches!(err, AppError::EgressBlocked) {
+                metrics::counter!(
+                    "watari_egress_blocked_total",
+                    "upstream" => upstream_name.clone()
+                )
+                .increment(1);
+            }
 
             tracing::warn!(
                 request_id = %request_id,

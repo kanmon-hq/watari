@@ -27,9 +27,49 @@ fn test_auth_constant_time() {
     assert!(verify_gateway_secret(Some(""), &secret).is_err());
 }
 
-/// Test healthz endpoint
+/// Test healthz, livez, and readyz endpoints
 #[tokio::test]
-async fn test_healthz() {
+async fn test_healthz_livez_readyz() {
+    let config = Config {
+        listen_addr: "127.0.0.1:8080".parse().unwrap(),
+        gateway_shared_secret: SecretString::new("test_secret".into()),
+        storage_backend: StorageBackendKind::Memory,
+        sqlite_path: "./watari.db".into(),
+        memory_seed_file: "./non_existent.yaml".into(),
+        secret_backend: SecretBackendKind::Env,
+        secret_file_dir: None,
+        secret_cache_ttl_secs: 300,
+        secret_max_stale_secs: 900,
+        tenant_cache_ttl_secs: 60,
+        tenant_cache_max_entries: 1000,
+        log_level: "info".into(),
+        log_format: LogFormat::Json,
+        allow_private_ips: true,
+        allow_insecure_upstream: true,
+    };
+
+    let state = init_app_state(config).await.unwrap();
+    let app = create_router(state);
+
+    for path in ["/healthz", "/livez", "/readyz"] {
+        let req = Request::builder()
+            .uri(path)
+            .method("GET")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = to_bytes(resp.into_body(), 1024).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "ok");
+    }
+}
+
+/// Test metrics endpoint returns Prometheus text format
+#[tokio::test]
+async fn test_metrics_endpoint() {
     let config = Config {
         listen_addr: "127.0.0.1:8080".parse().unwrap(),
         gateway_shared_secret: SecretString::new("test_secret".into()),
@@ -52,17 +92,17 @@ async fn test_healthz() {
     let app = create_router(state);
 
     let req = Request::builder()
-        .uri("/healthz")
+        .uri("/metrics")
         .method("GET")
         .body(Body::empty())
         .unwrap();
 
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-
-    let body = to_bytes(resp.into_body(), 1024).await.unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["status"], "ok");
+    assert_eq!(
+        resp.headers().get("content-type").unwrap(),
+        "text/plain; version=0.0.4; charset=utf-8"
+    );
 }
 
 /// Test 401 Unauthorized when missing or invalid X-Gateway-Secret

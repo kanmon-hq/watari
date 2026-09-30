@@ -18,6 +18,9 @@ use reqwest::Client;
 use serde_json::json;
 use std::sync::Arc;
 
+use crate::metrics::init_metrics_recorder;
+use metrics_exporter_prometheus::PrometheusHandle;
+
 /// Global application state.
 #[derive(Clone)]
 pub struct AppState {
@@ -26,17 +29,41 @@ pub struct AppState {
     pub secret_store: Arc<dyn SecretStore>,
     pub rate_limiter: Arc<dyn RateLimiter>,
     pub client: Client,
+    pub metrics_handle: PrometheusHandle,
 }
 
-/// Health check handler.
-pub async fn healthz_handler() -> impl IntoResponse {
+/// Liveness probe handler (checks if process is running).
+pub async fn livez_handler() -> impl IntoResponse {
     (StatusCode::OK, Json(json!({ "status": "ok" })))
+}
+
+/// Readiness probe handler (checks if server is ready to accept traffic).
+pub async fn readyz_handler() -> impl IntoResponse {
+    (StatusCode::OK, Json(json!({ "status": "ok" })))
+}
+
+/// Legacy / general health check handler (alias for livez).
+pub async fn healthz_handler() -> impl IntoResponse {
+    livez_handler().await
+}
+
+/// Prometheus metrics endpoint handler.
+pub async fn metrics_handler(axum::extract::State(state): axum::extract::State<AppState>) -> impl IntoResponse {
+    let metrics = state.metrics_handle.render();
+    (
+        StatusCode::OK,
+        [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
+        metrics,
+    )
 }
 
 /// Build the Axum Router.
 pub fn create_router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz_handler))
+        .route("/livez", get(livez_handler))
+        .route("/readyz", get(readyz_handler))
+        .route("/metrics", get(metrics_handler))
         .route("/u/{upstream}/{*path}", any(proxy_handler))
         .with_state(state)
 }
@@ -147,11 +174,15 @@ pub async fn init_app_state(config: Config) -> Result<AppState, AppError> {
     let client = create_proxy_client(config.allow_private_ips)
         .map_err(|e| AppError::Internal(format!("failed to initialize reqwest client: {e}")))?;
 
+    // 5. Initialize Prometheus Metrics Recorder
+    let metrics_handle = init_metrics_recorder();
+
     Ok(AppState {
         config,
         tenant_store,
         secret_store,
         rate_limiter,
         client,
+        metrics_handle,
     })
 }

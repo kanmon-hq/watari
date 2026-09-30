@@ -90,6 +90,22 @@ struct ErrorDetail {
 }
 
 impl AppError {
+    pub fn status_code(&self) -> StatusCode {
+        match self {
+            Self::Config(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::MissingTenant => StatusCode::BAD_REQUEST,
+            Self::Unauthorized => StatusCode::UNAUTHORIZED,
+            Self::UpstreamForbidden => StatusCode::FORBIDDEN,
+            Self::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
+            Self::EgressBlocked => StatusCode::BAD_GATEWAY,
+            Self::UpstreamUnreachable => StatusCode::BAD_GATEWAY,
+            Self::UpstreamTimeout => StatusCode::GATEWAY_TIMEOUT,
+            Self::SecretError(_) => StatusCode::BAD_GATEWAY,
+            Self::StoreError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
     pub fn to_response_with_request_id(&self, request_id: Option<String>) -> Response {
         let (status, code, message, retry_after) = match self {
             Self::Config(e) => (
