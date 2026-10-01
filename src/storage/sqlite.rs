@@ -141,6 +141,7 @@ impl TenantConfigStore for SqliteTenantStore {
                         burst: burst as u32,
                     },
                     timeout_secs: timeout_secs as u64,
+                    allowed_domains: None,
                 };
 
                 config
@@ -151,5 +152,70 @@ impl TenantConfigStore for SqliteTenantStore {
             }
             None => Ok(None),
         }
+    }
+
+    async fn list_upstreams(&self) -> Result<Vec<UpstreamConfig>, StoreError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT tenant_id, upstream, base_url, inject_json, rate_limit_rpm, rate_limit_burst, timeout_secs
+            FROM upstreams;
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StoreError::Database(format!("failed to list upstreams from sqlite: {e}")))?;
+
+        let mut list = Vec::new();
+        for r in rows {
+            let tenant_id: String = r.get(0);
+            let upstream: String = r.get(1);
+            let base_url_str: String = r.get(2);
+            let inject_json_str: String = r.get(3);
+            let rpm: i64 = r.get(4);
+            let burst: i64 = r.get(5);
+            let timeout_secs: i64 = r.get(6);
+
+            let base_url = Url::parse(&base_url_str)
+                .map_err(|e| StoreError::Database(format!("corrupt base_url in sqlite: {e}")))?;
+
+            let inject: Vec<InjectRule> = serde_json::from_str(&inject_json_str)
+                .map_err(|e| StoreError::Database(format!("corrupt inject_json in sqlite: {e}")))?;
+
+            let config = UpstreamConfig {
+                tenant_id,
+                upstream,
+                base_url,
+                inject,
+                rate_limit: RateLimitConfig {
+                    rpm: rpm as u32,
+                    burst: burst as u32,
+                },
+                timeout_secs: timeout_secs as u64,
+                allowed_domains: None,
+            };
+
+            list.push(config);
+        }
+
+        Ok(list)
+    }
+
+    async fn upsert_upstream(&self, config: UpstreamConfig) -> Result<(), StoreError> {
+        self.upsert(&config).await
+    }
+
+    async fn delete_upstream(&self, tenant_id: &str, upstream: &str) -> Result<bool, StoreError> {
+        let res = sqlx::query(
+            r#"
+            DELETE FROM upstreams WHERE tenant_id = ? AND upstream = ?;
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(upstream)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| StoreError::Database(format!("failed to delete upstream from sqlite: {e}")))?;
+
+        Ok(res.rows_affected() > 0)
     }
 }

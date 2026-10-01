@@ -27,19 +27,21 @@ struct YamlUpstreamEntry {
     rate_limit: RateLimitConfig,
     #[serde(default = "super::default_timeout_secs")]
     timeout_secs: u64,
+    #[serde(default)]
+    allowed_domains: Option<Vec<String>>,
 }
 
 /// In-memory implementation of `TenantConfigStore`.
 #[derive(Debug, Clone)]
 pub struct MemoryTenantStore {
-    configs: Arc<HashMap<(String, String), UpstreamConfig>>,
+    configs: Arc<tokio::sync::RwLock<HashMap<(String, String), UpstreamConfig>>>,
 }
 
 impl MemoryTenantStore {
     /// Create empty store.
     pub fn new() -> Self {
         Self {
-            configs: Arc::new(HashMap::new()),
+            configs: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         }
     }
 
@@ -74,6 +76,7 @@ impl MemoryTenantStore {
                     inject: upstream_entry.inject,
                     rate_limit: upstream_entry.rate_limit,
                     timeout_secs: upstream_entry.timeout_secs,
+                    allowed_domains: upstream_entry.allowed_domains,
                 };
 
                 config.validate(allow_insecure).map_err(|e| {
@@ -87,15 +90,25 @@ impl MemoryTenantStore {
         }
 
         Ok(Self {
-            configs: Arc::new(configs),
+            configs: Arc::new(tokio::sync::RwLock::new(configs)),
         })
     }
 
-    /// Insert or overwrite an upstream config (useful for testing).
+    /// Insert or overwrite an upstream config synchronously (useful for testing).
     pub fn insert(&mut self, config: UpstreamConfig) {
-        let mut map = (*self.configs).clone();
-        map.insert((config.tenant_id.clone(), config.upstream.clone()), config);
-        self.configs = Arc::new(map);
+        if let Ok(mut map) = self.configs.try_write() {
+            map.insert((config.tenant_id.clone(), config.upstream.clone()), config);
+        } else {
+            let configs = self.configs.clone();
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async move {
+                    configs
+                        .write()
+                        .await
+                        .insert((config.tenant_id.clone(), config.upstream.clone()), config);
+                });
+            });
+        }
     }
 }
 
@@ -113,6 +126,24 @@ impl TenantConfigStore for MemoryTenantStore {
         upstream: &str,
     ) -> Result<Option<UpstreamConfig>, StoreError> {
         let key = (tenant_id.to_string(), upstream.to_string());
-        Ok(self.configs.get(&key).cloned())
+        let map = self.configs.read().await;
+        Ok(map.get(&key).cloned())
+    }
+
+    async fn list_upstreams(&self) -> Result<Vec<UpstreamConfig>, StoreError> {
+        let map = self.configs.read().await;
+        Ok(map.values().cloned().collect())
+    }
+
+    async fn upsert_upstream(&self, config: UpstreamConfig) -> Result<(), StoreError> {
+        let mut map = self.configs.write().await;
+        map.insert((config.tenant_id.clone(), config.upstream.clone()), config);
+        Ok(())
+    }
+
+    async fn delete_upstream(&self, tenant_id: &str, upstream: &str) -> Result<bool, StoreError> {
+        let mut map = self.configs.write().await;
+        let key = (tenant_id.to_string(), upstream.to_string());
+        Ok(map.remove(&key).is_some())
     }
 }

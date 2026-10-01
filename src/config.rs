@@ -8,6 +8,7 @@ pub enum StorageBackendKind {
     #[default]
     Memory,
     Sqlite,
+    Dynamodb,
 }
 
 impl std::str::FromStr for StorageBackendKind {
@@ -17,6 +18,7 @@ impl std::str::FromStr for StorageBackendKind {
         match s.to_lowercase().as_str() {
             "memory" => Ok(Self::Memory),
             "sqlite" => Ok(Self::Sqlite),
+            "dynamodb" => Ok(Self::Dynamodb),
             other => Err(format!("unknown storage backend: {other}")),
         }
     }
@@ -71,15 +73,23 @@ impl std::str::FromStr for LogFormat {
 /// Application configuration loaded from environment variables.
 #[derive(Clone)]
 pub struct Config {
-    /// Address to listen on. Default: 0.0.0.0:8080
+    /// Address to listen on. Default: 0.0.0.0:8080 (or HTTP_PORT)
     pub listen_addr: SocketAddr,
     /// Shared secret for verifying X-Gateway-Secret header.
-    pub gateway_shared_secret: SecretString,
+    pub gateway_shared_secret: Option<SecretString>,
+    /// Previous shared secret for graceful rotation.
+    pub gateway_shared_secret_previous: Option<SecretString>,
+    /// Insecure flag to skip gateway shared secret verification. Default: false
+    pub insecure_no_gateway_auth: bool,
+    /// Admin API key for managing providers/tenants.
+    pub admin_api_key: Option<SecretString>,
     /// Storage backend to use. Default: memory
     pub storage_backend: StorageBackendKind,
-    /// Path to sqlite database file if storage_backend is sqlite. Default: ./watari.db
+    /// Path to sqlite database file if storage_backend is sqlite. Default: /data/watari.db
     pub sqlite_path: String,
-    /// Path to seed YAML file for memory storage backend. Default: ./tenants.yaml
+    /// DynamoDB table name if storage_backend is dynamodb. Default: watari_configs
+    pub dynamodb_table_name: String,
+    /// Path to seed YAML file for memory storage backend. Default: ./examples/tenants.yaml
     pub memory_seed_file: PathBuf,
     /// Secret store backend to use. Default: env
     pub secret_backend: SecretBackendKind,
@@ -101,26 +111,49 @@ pub struct Config {
     pub allow_private_ips: bool,
     /// Allow insecure HTTP upstreams (Dev/Testing only). Default: false
     pub allow_insecure_upstream: bool,
+    /// Maximum in-flight retry attempts for upstream 429/503. Default: 3
+    pub max_retries: usize,
+    /// Base backoff duration in milliseconds for retries. Default: 100
+    pub retry_base_backoff_ms: u64,
 }
 
 impl Config {
     /// Load configuration from environment variables.
     pub fn from_env() -> Result<Self, crate::error::ConfigError> {
-        let listen_addr_str =
-            std::env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
+        let listen_addr_str = std::env::var("LISTEN_ADDR").unwrap_or_else(|_| {
+            let port = std::env::var("HTTP_PORT").unwrap_or_else(|_| "8080".to_string());
+            format!("0.0.0.0:{port}")
+        });
         let listen_addr: SocketAddr = listen_addr_str.parse().map_err(|e| {
-            crate::error::ConfigError::InvalidValue(format!("LISTEN_ADDR invalid: {e}"))
+            crate::error::ConfigError::InvalidValue(format!("LISTEN_ADDR/HTTP_PORT invalid: {e}"))
         })?;
 
-        let secret_raw = std::env::var("GATEWAY_SHARED_SECRET").map_err(|_| {
-            crate::error::ConfigError::MissingRequired("GATEWAY_SHARED_SECRET".to_string())
-        })?;
-        if secret_raw.trim().is_empty() {
-            return Err(crate::error::ConfigError::MissingRequired(
-                "GATEWAY_SHARED_SECRET cannot be empty".to_string(),
-            ));
-        }
-        let gateway_shared_secret = SecretString::new(secret_raw.into());
+        let insecure_no_gateway_auth = std::env::var("INSECURE_NO_GATEWAY_AUTH")
+            .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+            .unwrap_or(false);
+
+        let gateway_shared_secret = match std::env::var("GATEWAY_SHARED_SECRET") {
+            Ok(val) if !val.trim().is_empty() => Some(SecretString::new(val.into())),
+            _ => {
+                if !insecure_no_gateway_auth {
+                    return Err(crate::error::ConfigError::MissingRequired(
+                        "GATEWAY_SHARED_SECRET (or set INSECURE_NO_GATEWAY_AUTH=true for testing)"
+                            .to_string(),
+                    ));
+                }
+                None
+            }
+        };
+
+        let gateway_shared_secret_previous = std::env::var("GATEWAY_SHARED_SECRET_PREVIOUS")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .map(|v| SecretString::new(v.into()));
+
+        let admin_api_key = std::env::var("ADMIN_API_KEY")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .map(|v| SecretString::new(v.into()));
 
         let storage_backend_str =
             std::env::var("STORAGE_BACKEND").unwrap_or_else(|_| "memory".to_string());
@@ -129,9 +162,13 @@ impl Config {
         })?;
 
         let sqlite_path =
-            std::env::var("SQLITE_PATH").unwrap_or_else(|_| "./watari.db".to_string());
+            std::env::var("SQLITE_PATH").unwrap_or_else(|_| "/data/watari.db".to_string());
+        let dynamodb_table_name =
+            std::env::var("DYNAMODB_TABLE_NAME").unwrap_or_else(|_| "watari_configs".to_string());
+
         let memory_seed_file = PathBuf::from(
-            std::env::var("MEMORY_SEED_FILE").unwrap_or_else(|_| "./tenants.yaml".to_string()),
+            std::env::var("MEMORY_SEED_FILE")
+                .unwrap_or_else(|_| "./examples/tenants.yaml".to_string()),
         );
 
         let secret_backend_str =
@@ -192,11 +229,25 @@ impl Config {
             .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
             .unwrap_or(false);
 
+        let max_retries = std::env::var("MAX_RETRIES")
+            .unwrap_or_else(|_| "3".to_string())
+            .parse::<usize>()
+            .unwrap_or(3);
+
+        let retry_base_backoff_ms = std::env::var("RETRY_BASE_BACKOFF_MS")
+            .unwrap_or_else(|_| "100".to_string())
+            .parse::<u64>()
+            .unwrap_or(100);
+
         Ok(Self {
             listen_addr,
             gateway_shared_secret,
+            gateway_shared_secret_previous,
+            insecure_no_gateway_auth,
+            admin_api_key,
             storage_backend,
             sqlite_path,
+            dynamodb_table_name,
             memory_seed_file,
             secret_backend,
             secret_file_dir,
@@ -208,6 +259,8 @@ impl Config {
             log_format,
             allow_private_ips,
             allow_insecure_upstream,
+            max_retries,
+            retry_base_backoff_ms,
         })
     }
 }

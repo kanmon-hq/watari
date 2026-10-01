@@ -46,4 +46,20 @@ impl TenantConfigStore for CachedTenantStore {
             Err(e) => Err(StoreError::Database(format!("{e}"))),
         }
     }
+
+    async fn list_upstreams(&self) -> Result<Vec<UpstreamConfig>, StoreError> {
+        self.inner.list_upstreams().await
+    }
+
+    async fn upsert_upstream(&self, config: UpstreamConfig) -> Result<(), StoreError> {
+        let key = (config.tenant_id.clone(), config.upstream.clone());
+        self.cache.invalidate(&key).await;
+        self.inner.upsert_upstream(config).await
+    }
+
+    async fn delete_upstream(&self, tenant_id: &str, upstream: &str) -> Result<bool, StoreError> {
+        let key = (tenant_id.to_string(), upstream.to_string());
+        self.cache.invalidate(&key).await;
+        self.inner.delete_upstream(tenant_id, upstream).await
+    }
 }

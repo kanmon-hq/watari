@@ -58,6 +58,9 @@ pub struct UpstreamConfig {
     pub rate_limit: RateLimitConfig,
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
+    /// Explicit domain allowlist (FQDNs). If None, defaults to base_url host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_domains: Option<Vec<String>>,
 }
 
 fn default_timeout_secs() -> u64 {
@@ -94,6 +97,17 @@ impl UpstreamConfig {
             ));
         }
 
+        if let Some(domains) = &self.allowed_domains {
+            for domain in domains {
+                if domain.trim().is_empty() {
+                    return Err(format!(
+                        "upstream '{}' contains empty domain in allowed_domains",
+                        self.upstream
+                    ));
+                }
+            }
+        }
+
         for rule in &self.inject {
             if axum::http::HeaderName::from_bytes(rule.header.as_bytes()).is_err() {
                 return Err(format!(
@@ -111,6 +125,17 @@ impl UpstreamConfig {
 
         Ok(())
     }
+
+    /// Check if target host is allowed by this upstream config.
+    pub fn is_domain_allowed(&self, host: &str) -> bool {
+        if let Some(allowed) = &self.allowed_domains {
+            allowed.iter().any(|d| d.eq_ignore_ascii_case(host))
+        } else if let Some(base_host) = self.base_url.host_str() {
+            base_host.eq_ignore_ascii_case(host)
+        } else {
+            false
+        }
+    }
 }
 
 /// Trait for retrieving tenant upstream configurations.
@@ -121,4 +146,16 @@ pub trait TenantConfigStore: Send + Sync {
         tenant_id: &str,
         upstream: &str,
     ) -> Result<Option<UpstreamConfig>, StoreError>;
+
+    async fn list_upstreams(&self) -> Result<Vec<UpstreamConfig>, StoreError> {
+        Ok(Vec::new())
+    }
+
+    async fn upsert_upstream(&self, _config: UpstreamConfig) -> Result<(), StoreError> {
+        Err(StoreError::Io("Upsert not supported on this store".into()))
+    }
+
+    async fn delete_upstream(&self, _tenant_id: &str, _upstream: &str) -> Result<bool, StoreError> {
+        Err(StoreError::Io("Delete not supported on this store".into()))
+    }
 }

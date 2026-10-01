@@ -3,19 +3,19 @@ pub mod headers;
 pub mod url;
 
 use crate::app::AppState;
-use crate::auth::verify_gateway_secret;
+use crate::auth::verify_gateway_auth;
 use crate::error::AppError;
 use crate::proxy::headers::{sanitize_and_inject_request_headers, sanitize_response_headers};
 use crate::proxy::url::build_upstream_url;
 use crate::ratelimit::{RateDecision, RateKey};
-use axum::body::Body;
+use axum::body::{to_bytes, Body, Bytes};
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, Method, Response, Uri};
+use axum::http::{HeaderMap, Method, Response, StatusCode, Uri};
 use axum::response::IntoResponse;
 use futures_util::TryStreamExt;
 use secrecy::SecretString;
 use std::error::Error;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 struct ProxyRequestContext<'a> {
@@ -25,11 +25,11 @@ struct ProxyRequestContext<'a> {
     method: Method,
     uri: &'a Uri,
     headers: &'a HeaderMap,
-    body: Body,
+    body_bytes: Bytes,
     request_id: &'a str,
 }
 
-/// Main proxy handler for ANY /u/{upstream}/{*path}
+/// Main proxy handler for ANY /v1/providers/{provider_id}/*path and /u/{upstream}/{*path}
 pub async fn proxy_handler(
     State(state): State<AppState>,
     Path((upstream_name, subpath)): Path<(String, String)>,
@@ -47,6 +47,15 @@ pub async fn proxy_handler(
         .map(|s| s.to_string())
         .unwrap_or_else(|| Uuid::new_v4().to_string());
 
+    // Buffer body to allow in-flight retry
+    let body_bytes = match to_bytes(body, 64 * 1024 * 1024).await {
+        Ok(b) => b,
+        Err(e) => {
+            return AppError::Internal(format!("failed to buffer request body: {e}"))
+                .to_response_with_request_id(Some(request_id));
+        }
+    };
+
     let ctx = ProxyRequestContext {
         state: &state,
         upstream_name: &upstream_name,
@@ -54,7 +63,7 @@ pub async fn proxy_handler(
         method,
         uri: &uri,
         headers: &headers,
-        body,
+        body_bytes,
         request_id: &request_id,
     };
 
@@ -155,7 +164,12 @@ async fn execute_proxy_request(ctx: ProxyRequestContext<'_>) -> Result<Response<
         .headers
         .get("x-gateway-secret")
         .and_then(|v| v.to_str().ok());
-    verify_gateway_secret(gateway_secret_hdr, &ctx.state.config.gateway_shared_secret)?;
+    verify_gateway_auth(
+        gateway_secret_hdr,
+        ctx.state.config.gateway_shared_secret.as_ref(),
+        ctx.state.config.gateway_shared_secret_previous.as_ref(),
+        ctx.state.config.insecure_no_gateway_auth,
+    )?;
 
     // 2. Extract Tenant ID
     let tenant_id = ctx
@@ -176,7 +190,7 @@ async fn execute_proxy_request(ctx: ProxyRequestContext<'_>) -> Result<Response<
         .await?
         .ok_or(AppError::UpstreamForbidden)?;
 
-    // 4. Rate Limiting Check
+    // 4. Rate Limiting Check with Micro-delay smoothing
     let rate_key = RateKey {
         tenant_id: tenant_id.to_string(),
         upstream: ctx.upstream_name.to_string(),
@@ -198,6 +212,17 @@ async fn execute_proxy_request(ctx: ProxyRequestContext<'_>) -> Result<Response<
     let target_url = build_upstream_url(&upstream_config.base_url, ctx.subpath, query)
         .map_err(|_| AppError::UpstreamForbidden)?;
 
+    // 5.1 Domain Allowlist verification
+    let target_host = target_url.host_str().unwrap_or("");
+    if !upstream_config.is_domain_allowed(target_host) {
+        tracing::warn!(
+            host = %target_host,
+            upstream = %ctx.upstream_name,
+            "Target domain is not allowed by upstream allowlist"
+        );
+        return Err(AppError::UpstreamForbidden);
+    }
+
     // 6. Fetch Secrets for Injection
     let mut resolved_secrets: Vec<(crate::storage::InjectRule, SecretString)> = Vec::new();
     for rule in &upstream_config.inject {
@@ -213,55 +238,103 @@ async fn execute_proxy_request(ctx: ProxyRequestContext<'_>) -> Result<Response<
     let outgoing_headers =
         sanitize_and_inject_request_headers(ctx.headers, ctx.request_id, &resolved_secrets);
 
-    // 8. Prepare reqwest Streaming Request
-    let reqwest_body = reqwest::Body::wrap_stream(ctx.body.into_data_stream());
-    let req_builder = ctx
-        .state
-        .client
-        .request(ctx.method, target_url.as_str())
-        .headers(outgoing_headers)
-        .body(reqwest_body)
-        .timeout(std::time::Duration::from_secs(upstream_config.timeout_secs));
+    // 8. In-flight Retry Loop with Exponential Backoff and Retry-After
+    let max_retries = ctx.state.config.max_retries;
+    let base_backoff_ms = ctx.state.config.retry_base_backoff_ms;
+    let mut attempt = 0;
 
-    // 9. Forward Request and Stream Response
-    let upstream_response = req_builder.send().await.map_err(|err| {
-        if err.is_timeout() {
-            AppError::UpstreamTimeout
-        } else if let Some(io_err) = err
-            .source()
-            .and_then(|s| s.downcast_ref::<std::io::Error>())
-        {
-            if io_err.kind() == std::io::ErrorKind::PermissionDenied {
-                AppError::EgressBlocked
-            } else {
-                AppError::UpstreamUnreachable
+    loop {
+        attempt += 1;
+
+        let req_builder = ctx
+            .state
+            .client
+            .request(ctx.method.clone(), target_url.as_str())
+            .headers(outgoing_headers.clone())
+            .body(ctx.body_bytes.clone())
+            .timeout(Duration::from_secs(upstream_config.timeout_secs));
+
+        let send_result = req_builder.send().await;
+
+        match send_result {
+            Ok(upstream_response) => {
+                let status_code = upstream_response.status();
+
+                // Check for retryable status codes (429 Too Many Requests, 503 Service Unavailable)
+                if (status_code == StatusCode::TOO_MANY_REQUESTS
+                    || status_code == StatusCode::SERVICE_UNAVAILABLE)
+                    && attempt <= max_retries
+                {
+                    let backoff_duration = if let Some(retry_after) = upstream_response
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.parse::<u64>().ok())
+                    {
+                        Duration::from_secs(retry_after.min(10))
+                    } else {
+                        // Exponential backoff: base * 2^(attempt - 1) with simple jitter
+                        let factor = 1u64.checked_shl((attempt - 1) as u32).unwrap_or(16);
+                        let backoff_ms = (base_backoff_ms * factor).min(5000);
+                        Duration::from_millis(backoff_ms)
+                    };
+
+                    tracing::warn!(
+                        attempt = attempt,
+                        max_retries = max_retries,
+                        status = %status_code.as_u16(),
+                        backoff_ms = backoff_duration.as_millis(),
+                        "Upstream returned retryable status, retrying in-flight..."
+                    );
+
+                    tokio::time::sleep(backoff_duration).await;
+                    continue;
+                }
+
+                // Non-retryable or success
+                let sanitized_resp_headers = sanitize_response_headers(upstream_response.headers());
+                let resp_stream = upstream_response
+                    .bytes_stream()
+                    .map_err(|e| std::io::Error::other(format!("stream error: {e}")));
+                let response_body = Body::from_stream(resp_stream);
+
+                let mut response_builder = Response::builder().status(status_code);
+                for (k, v) in sanitized_resp_headers.iter() {
+                    response_builder = response_builder.header(k, v);
+                }
+
+                if let Ok(req_id_val) = axum::http::HeaderValue::from_str(ctx.request_id) {
+                    response_builder = response_builder.header("x-request-id", req_id_val);
+                }
+
+                let response = response_builder.body(response_body).unwrap_or_else(|_| {
+                    AppError::Internal("failed to build response".into()).into_response()
+                });
+
+                return Ok(response);
             }
-        } else {
-            AppError::UpstreamUnreachable
+            Err(err) => {
+                if attempt <= max_retries && !err.is_timeout() {
+                    let backoff_ms = (base_backoff_ms * (1 << (attempt - 1))).min(5000);
+                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                    continue;
+                }
+
+                if err.is_timeout() {
+                    return Err(AppError::UpstreamTimeout);
+                } else if let Some(io_err) = err
+                    .source()
+                    .and_then(|s| s.downcast_ref::<std::io::Error>())
+                {
+                    if io_err.kind() == std::io::ErrorKind::PermissionDenied {
+                        return Err(AppError::EgressBlocked);
+                    } else {
+                        return Err(AppError::UpstreamUnreachable);
+                    }
+                } else {
+                    return Err(AppError::UpstreamUnreachable);
+                }
+            }
         }
-    })?;
-
-    // 10. Process Response Headers and Stream Body
-    let status_code = upstream_response.status();
-    let sanitized_resp_headers = sanitize_response_headers(upstream_response.headers());
-    let resp_stream = upstream_response
-        .bytes_stream()
-        .map_err(|e| std::io::Error::other(format!("stream error: {e}")));
-    let response_body = Body::from_stream(resp_stream);
-
-    let mut response_builder = Response::builder().status(status_code);
-    for (k, v) in sanitized_resp_headers.iter() {
-        response_builder = response_builder.header(k, v);
     }
-
-    // Ensure X-Request-ID is in response
-    if let Ok(req_id_val) = axum::http::HeaderValue::from_str(ctx.request_id) {
-        response_builder = response_builder.header("x-request-id", req_id_val);
-    }
-
-    let response = response_builder
-        .body(response_body)
-        .unwrap_or_else(|_| AppError::Internal("failed to build response".into()).into_response());
-
-    Ok(response)
 }

@@ -7,8 +7,11 @@ services:
     ports:
       - "8080:8080"
     environment:
+      # ポート設定
+      - HTTP_PORT=8080
       # 認証用共有シークレット（ローカル開発用）
       - GATEWAY_SHARED_SECRET=dev-gateway-shared-secret-local
+      - ADMIN_API_KEY=dev-admin-api-key-local
       # ストレージ設定
       - STORAGE_BACKEND=memory
       - MEMORY_SEED_FILE=/app/examples/tenants.yaml
@@ -26,7 +29,7 @@ services:
     volumes:
       - ./examples:/app/examples:ro
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://127.0.0.1:8080/healthz"]
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8080/livez"]
       interval: 5s
       timeout: 3s
       retries: 3

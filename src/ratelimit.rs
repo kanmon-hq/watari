@@ -72,9 +72,16 @@ impl RateLimiter for GovernorRateLimiter {
             Err(negative) => {
                 let wait_duration =
                     negative.wait_time_from(governor::clock::Clock::now(&DefaultClock::default()));
-                let secs = wait_duration.as_secs().max(1);
-                RateDecision::Deny {
-                    retry_after_secs: secs,
+
+                // Micro-delay smoothing: if wait time is short (<= 500ms), sleep and allow
+                if wait_duration <= Duration::from_millis(500) {
+                    tokio::time::sleep(wait_duration).await;
+                    RateDecision::Allow
+                } else {
+                    let secs = wait_duration.as_secs().max(1);
+                    RateDecision::Deny {
+                        retry_after_secs: secs,
+                    }
                 }
             }
         }

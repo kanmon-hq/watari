@@ -48,7 +48,9 @@ pub async fn healthz_handler() -> impl IntoResponse {
 }
 
 /// Prometheus metrics endpoint handler.
-pub async fn metrics_handler(axum::extract::State(state): axum::extract::State<AppState>) -> impl IntoResponse {
+pub async fn metrics_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> impl IntoResponse {
     let metrics = state.metrics_handle.render();
     (
         StatusCode::OK,
@@ -57,14 +59,29 @@ pub async fn metrics_handler(axum::extract::State(state): axum::extract::State<A
     )
 }
 
+use crate::admin::{delete_provider_handler, list_providers_handler, upsert_provider_handler};
+
 /// Build the Axum Router.
 pub fn create_router(state: AppState) -> Router {
     Router::new()
+        // Health check endpoints
         .route("/healthz", get(healthz_handler))
         .route("/livez", get(livez_handler))
         .route("/readyz", get(readyz_handler))
+        // Prometheus metrics
         .route("/metrics", get(metrics_handler))
+        // Proxy endpoints (kanmon standard and legacy)
+        .route("/v1/providers/{upstream}/{*path}", any(proxy_handler))
         .route("/u/{upstream}/{*path}", any(proxy_handler))
+        // Admin management endpoints
+        .route(
+            "/admin/v1/providers",
+            get(list_providers_handler).post(upsert_provider_handler),
+        )
+        .route(
+            "/admin/v1/providers/{tenant_id}/{provider_id}",
+            axum::routing::delete(delete_provider_handler),
+        )
         .with_state(state)
 }
 
@@ -112,6 +129,11 @@ pub async fn init_app_state(config: Config) -> Result<AppState, AppError> {
                     "SQLite feature not compiled in".into(),
                 )));
             }
+        }
+        StorageBackendKind::Dynamodb => {
+            return Err(AppError::Config(crate::error::ConfigError::InvalidValue(
+                "DynamoDB storage backend is planned for future release".into(),
+            )));
         }
     };
 
