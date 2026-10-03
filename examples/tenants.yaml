@@ -2,7 +2,8 @@ tenants:
   tenant-a:
     upstreams:
       stripe:
-        base_url: "https://api.stripe.com"
+        # ローカルモック用: http://stripe-mock:12111 (本番用: https://api.stripe.com)
+        base_url: "http://stripe-mock:12111"
         inject:
           - header: "Authorization"
             template: "Bearer {secret}"
@@ -13,7 +14,8 @@ tenants:
           burst: 10
         timeout_secs: 30
       sendgrid:
-        base_url: "https://api.sendgrid.com"
+        # ローカルモック用: http://prism-mock:4010 (本番用: https://api.sendgrid.com)
+        base_url: "http://prism-mock:4010"
         inject:
           - header: "Authorization"
             template: "Bearer {secret}"

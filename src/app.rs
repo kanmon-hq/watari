@@ -70,9 +70,8 @@ pub fn create_router(state: AppState) -> Router {
         .route("/readyz", get(readyz_handler))
         // Prometheus metrics
         .route("/metrics", get(metrics_handler))
-        // Proxy endpoints (kanmon standard and legacy)
+        // Proxy endpoint (kanmon standard)
         .route("/v1/providers/{upstream}/{*path}", any(proxy_handler))
-        .route("/u/{upstream}/{*path}", any(proxy_handler))
         // Admin management endpoints
         .route(
             "/admin/v1/providers",

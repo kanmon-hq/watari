@@ -29,7 +29,7 @@ struct ProxyRequestContext<'a> {
     request_id: &'a str,
 }
 
-/// Main proxy handler for ANY /v1/providers/{provider_id}/*path and /u/{upstream}/{*path}
+/// Main proxy handler for ANY /v1/providers/{provider_id}/*path
 pub async fn proxy_handler(
     State(state): State<AppState>,
     Path((upstream_name, subpath)): Path<(String, String)>,

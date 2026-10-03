@@ -35,7 +35,6 @@ Watari は、内部マイクロサービスや関門HQ他サービス（Kura/Por
 | `GET` | `/readyz` | トラフィック受信準備確認（Readiness probe） |
 | `GET` | `/metrics` | Prometheus 形式メトリクス |
 | `ANY` | `/v1/providers/{provider_id}/*path` | プロキシエンドポイント（関門標準） |
-| `ANY` | `/u/{upstream}/{*path}` | プロキシエンドポイント（後方互換） |
 | `GET` | `/admin/v1/providers` | プロバイダー設定一覧取得 |
 | `POST` | `/admin/v1/providers` | プロバイダー設定登録・更新 |
 | `DELETE` | `/admin/v1/providers/{tenant_id}/{provider_id}` | プロバイダー設定削除 |

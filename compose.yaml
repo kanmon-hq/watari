@@ -23,14 +23,38 @@ services:
       # ログ設定
       - LOG_LEVEL=debug
       - LOG_FORMAT=text
-      # 開発用フラグ（必要に応じてコンテナ内・ローカルIPへのアクセスを許可）
-      - ALLOW_PRIVATE_IPS=false
-      - ALLOW_INSECURE_UPSTREAM=false
+      # 開発用フラグ（モックコンテナ宛通信を許可）
+      - ALLOW_PRIVATE_IPS=true
+      - ALLOW_INSECURE_UPSTREAM=true
     volumes:
       - ./examples:/app/examples:ro
+    depends_on:
+      - stripe-mock
+      - prism-mock
     healthcheck:
       test: ["CMD", "curl", "-f", "http://127.0.0.1:8080/livez"]
       interval: 5s
       timeout: 3s
       retries: 3
     restart: unless-stopped
+
+  # Stripe公式モックサーバー (OpenAPI仕様に準拠)
+  stripe-mock:
+    image: stripe/stripe-mock:latest
+    container_name: stripe-mock
+    ports:
+      - "12111:12111" # HTTP
+      - "12112:12112" # HTTPS
+    restart: unless-stopped
+
+  # 汎用 OpenAPI モックサーバー (Stoplight Prism)
+  prism-mock:
+    image: stoplight/prism:5
+    container_name: prism-mock
+    ports:
+      - "4010:4010"
+    volumes:
+      - ./examples/openapi:/specs:ro
+    command: ["mock", "-h", "0.0.0.0", "/specs/api-spec.yaml"]
+    restart: unless-stopped
+

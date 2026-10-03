@@ -372,9 +372,9 @@ async fn test_proxy_forward_with_secret_injection_and_streaming() {
     assert_eq!(*received_custom_header.lock().await, "tenant_allowed_meta");
     assert_eq!(*received_body.lock().await, "amount=5000&currency=jpy");
 
-    // 4. Test Legacy Path /u/stripe/redirect
+    // 4. Test Redirect Policy (Must not follow redirect)
     let redirect_req = Request::builder()
-        .uri("/u/stripe/redirect")
+        .uri("/v1/providers/stripe/redirect")
         .method("GET")
         .header("X-Tenant-ID", "tenant-a")
         .header("X-Gateway-Secret", "test_secret")

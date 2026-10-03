@@ -1,0 +1,63 @@
+openapi: 3.0.3
+info:
+  title: Mock External Service API
+  version: 1.0.0
+  description: Sample OpenAPI specification for local development and testing with Stoplight Prism.
+paths:
+  /v3/mail/send:
+    post:
+      summary: Send an email (SendGrid mock)
+      operationId: sendMail
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                personalizations:
+                  type: array
+                  items:
+                    type: object
+                from:
+                  type: object
+                  properties:
+                    email:
+                      type: string
+                      example: test@example.com
+                subject:
+                  type: string
+                  example: Test Subject
+                content:
+                  type: array
+                  items:
+                    type: object
+      responses:
+        '202':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Email queued for delivery
+  /v1/ping:
+    get:
+      summary: Health ping check
+      operationId: ping
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  timestamp:
+                    type: string
+                    example: "2026-10-03T18:00:00Z"
